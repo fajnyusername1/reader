@@ -50,8 +50,8 @@ class MainActivity : AppCompatActivity() {
     private val coverExec = Executors.newFixedThreadPool(2)
     private val coverCache = LruCache<String, Bitmap>(24)
 
-    private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) importBook(uri)
+    private val picker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) importBooks(uris)
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -248,22 +248,41 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun importBook(uri: Uri) {
-        Toast.makeText(this, "Importing...", Toast.LENGTH_SHORT).show()
+    private fun importBooks(uris: List<Uri>) {
+        val n = uris.size
+        Toast.makeText(
+            this, if (n == 1) "Importing..." else "Importing $n files...", Toast.LENGTH_SHORT
+        ).show()
         Thread {
-            val book = try {
-                Library.import(this, uri)
-            } catch (e: Exception) {
-                null
+            var added = 0
+            var skipped = 0
+            var last: Book? = null
+            for (uri in uris) {
+                val book = try {
+                    Library.import(this, uri)
+                } catch (e: Exception) {
+                    null
+                }
+                if (book != null) {
+                    added++
+                    last = book
+                } else {
+                    skipped++
+                }
             }
             runOnUiThread {
-                if (book == null) {
-                    Toast.makeText(
+                refresh()
+                val only = last
+                when {
+                    added == 0 -> Toast.makeText(
                         this, "Unsupported or unreadable file (PDF, EPUB and TXT only)", Toast.LENGTH_LONG
                     ).show()
-                } else {
-                    refresh()
-                    open(book)
+                    n == 1 && only != null -> open(only)
+                    else -> {
+                        val msg = "Added $added book" + (if (added == 1) "" else "s") +
+                            (if (skipped > 0) " ($skipped skipped: unsupported or unreadable)" else "")
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         }.start()
