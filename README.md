@@ -3,7 +3,7 @@
 Main menu with a "Continue reading" card, an "Add new book" button and a library list.
 Your place is saved automatically whenever you leave the app and restored when you come back.
 
-- Supported files: PDF (continuous scroll, tap the page indicator to jump to a page) and TXT.
+- Supported files: PDF, EPUB and TXT. Bottom bar switches between Home and a cover-grid Library.
 - Imported books are copied into the app's private storage.
 - Long-press a book in the library to remove it.
 

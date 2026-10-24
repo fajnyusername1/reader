@@ -9,8 +9,11 @@ import java.io.File
 import java.util.UUID
 
 /**
- * position: PDF -> zero-based page index; TXT -> scroll progress 0..10000
- * total:    PDF -> page count;            TXT -> 10000
+ * position / total by type:
+ *   pdf  -> zero-based page index / page count
+ *   epub -> chapter * 10000 + progress inside chapter (0..9999) / chapterCount * 10000
+ *   txt  -> scroll progress 0..10000 / 10000
+ * path: file for pdf and txt, the unzipped folder for epub.
  * lastOpened == 0 means the book was never opened.
  */
 data class Book(
@@ -25,12 +28,14 @@ data class Book(
     fun progressText(): String = when {
         lastOpened == 0L -> "Not started"
         type == "pdf" -> "Page ${position + 1} of $total"
+        type == "epub" -> "Chapter ${position / 10000 + 1} of ${total / 10000}"
         else -> "${position / 100}%"
     }
 
     fun progressPercent(): Int = when {
         lastOpened == 0L -> 0
-        type == "pdf" -> if (total > 0) (position + 1) * 100 / total else 0
+        type == "pdf" -> if (total > 0) ((position + 1) * 100L / total).toInt() else 0
+        type == "epub" -> if (total > 0) (position * 100L / total).toInt() else 0
         else -> position / 100
     }
 }
@@ -86,11 +91,13 @@ object Library {
     }
 
     fun delete(ctx: Context, book: Book) {
-        File(book.path).delete()
+        val p = File(book.path)
+        if (p.isDirectory) p.deleteRecursively() else p.delete()
+        Covers.file(ctx, book).delete()
         save(ctx, load(ctx).filter { it.id != book.id })
     }
 
-    /** Copies the picked file into app storage. Returns null if the file type is unsupported. */
+    /** Copies/unpacks the picked file into app storage. Returns null if the file type is unsupported. */
     fun import(ctx: Context, uri: Uri): Book? {
         var name = "Book"
         ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
@@ -101,19 +108,49 @@ object Library {
         val mime = ctx.contentResolver.getType(uri)
         val type = when {
             lower.endsWith(".pdf") || mime == "application/pdf" -> "pdf"
+            lower.endsWith(".epub") || mime == "application/epub+zip" -> "epub"
             lower.endsWith(".txt") || mime == "text/plain" -> "txt"
             else -> return null
         }
         val id = UUID.randomUUID().toString()
-        val dir = File(ctx.filesDir, "books").apply { mkdirs() }
-        val file = File(dir, "$id.$type")
-        ctx.contentResolver.openInputStream(uri)?.use { input ->
-            file.outputStream().use { input.copyTo(it) }
-        } ?: return null
-        val book = Book(id, name.substringBeforeLast('.'), file.path, type, 0, 0, 0L)
+        val booksDir = File(ctx.filesDir, "books").apply { mkdirs() }
+        val fallbackTitle = name.substringBeforeLast('.')
+
+        val book: Book = (if (type == "epub") {
+            importEpub(ctx, uri, id, File(booksDir, id), fallbackTitle)
+        } else {
+            importFile(ctx, uri, id, File(booksDir, "$id.$type"), type, fallbackTitle)
+        }) ?: return null
+
+        try { Covers.ensure(ctx, book) } catch (e: Exception) { /* placeholder will be used */ }
+
         val books = load(ctx)
         books.add(book)
         save(ctx, books)
         return book
+    }
+
+    private fun importFile(ctx: Context, uri: Uri, id: String, file: File, type: String, title: String): Book? {
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+            file.outputStream().use { input.copyTo(it) }
+        } ?: return null
+        return Book(id, title, file.path, type, 0, 0, 0L)
+    }
+
+    private fun importEpub(ctx: Context, uri: Uri, id: String, dir: File, fallbackTitle: String): Book? {
+        try {
+            val input = ctx.contentResolver.openInputStream(uri) ?: return null
+            input.use { Epub.unzip(it, dir) }
+            val info = Epub.parse(dir)
+            if (info.spine.isEmpty()) {
+                dir.deleteRecursively()
+                return null
+            }
+            val title = info.title?.takeIf { it.isNotBlank() } ?: fallbackTitle
+            return Book(id, title, dir.path, "epub", 0, 0, 0L)
+        } catch (e: Exception) {
+            dir.deleteRecursively()
+            throw e
+        }
     }
 }
