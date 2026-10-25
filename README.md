@@ -5,7 +5,7 @@ Your place is saved automatically whenever you leave the app and restored when y
 
 - Supported files: PDF, EPUB and TXT. Bottom bar switches between Home and a cover-grid Library.
 - Imported books are copied into the app's private storage.
-- Long-press a book in the library to remove it.
+- Long-press a book for shelf, cover and remove options. Library menu (⋮) has backup, restore and reading theme.
 
 ## Build the APK
 

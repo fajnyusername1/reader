@@ -1,6 +1,10 @@
 package com.example.bookreader
 
+import android.graphics.Color
 import android.os.Bundle
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -11,9 +15,11 @@ import java.io.File
 class TextReaderActivity : AppCompatActivity() {
 
     private lateinit var book: Book
+    private lateinit var frame: FrameLayout
     private lateinit var scroll: ScrollView
     private lateinit var tv: TextView
     private var loaded = false
+    private var themeId = 0
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -22,14 +28,38 @@ class TextReaderActivity : AppCompatActivity() {
         val found = Library.find(this, intent.getStringExtra("id"))
         if (found == null) { finish(); return }
         book = found
+        themeId = ReaderTheme.get(this)
 
+        // Keep lines a comfortable length on wide screens.
+        val sidePad = maxOf(dp(20), (resources.displayMetrics.widthPixels - dp(720)) / 2)
         tv = TextView(this).apply {
             textSize = 18f
             setLineSpacing(0f, 1.25f)
-            setPadding(dp(20), dp(48), dp(20), dp(48))
+            setPadding(sidePad, dp(48), sidePad, dp(48))
         }
         scroll = ScrollView(this).apply { addView(tv) }
-        setContentView(scroll)
+
+        val themeBtn = TextView(this).apply {
+            text = "◐"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setOnClickListener {
+                themeId = ReaderTheme.next(this@TextReaderActivity)
+                applyTheme()
+            }
+        }
+        frame = FrameLayout(this)
+        frame.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        frame.addView(themeBtn, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.END
+        ).apply { setMargins(0, 0, dp(16), dp(24)) })
+        setContentView(frame)
+        applyTheme()
 
         Thread {
             try {
@@ -50,6 +80,13 @@ class TextReaderActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    private fun applyTheme() {
+        val bg = ReaderTheme.bg(themeId)
+        frame.setBackgroundColor(bg)
+        scroll.setBackgroundColor(bg)
+        tv.setTextColor(ReaderTheme.fg(themeId))
     }
 
     override fun onPause() {

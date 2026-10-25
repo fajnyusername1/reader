@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.text.Layout
 import android.text.StaticLayout
@@ -45,6 +46,27 @@ object Covers {
         return if (tmp.renameTo(f)) f else null
     }
 
+    /** Uses a picked image as the cover. Call from a background thread. */
+    fun setCustom(ctx: Context, book: Book, uri: Uri): Boolean {
+        return try {
+            val tmpIn = File(ctx.cacheDir, "cover_in")
+            ctx.contentResolver.openInputStream(uri)?.use { i ->
+                tmpIn.outputStream().use { i.copyTo(it) }
+            } ?: return false
+            val bmp = decodeScaled(tmpIn.path, 400)
+            tmpIn.delete()
+            if (bmp == null) return false
+            val flat = flatten(bmp)
+            val f = file(ctx, book)
+            f.parentFile?.mkdirs()
+            val tmp = File(f.path + ".tmp")
+            tmp.outputStream().use { flat.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            tmp.renameTo(f)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun pdfFirstPage(path: String): Bitmap? =
         ParcelFileDescriptor.open(File(path), ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
             PdfRenderer(pfd).use { r ->
@@ -69,7 +91,7 @@ object Covers {
         return flatten(b)
     }
 
-    private fun flatten(b: Bitmap): Bitmap {
+    fun flatten(b: Bitmap): Bitmap {
         if (!b.hasAlpha()) return b
         val out = Bitmap.createBitmap(b.width, b.height, Bitmap.Config.ARGB_8888)
         val c = Canvas(out)

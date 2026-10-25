@@ -11,10 +11,14 @@ import java.io.StringReader
 import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
-class EpubInfo(val title: String?, val spine: List<File>, val cover: File?)
+class TocEntry(val title: String, val level: Int, val spineIndex: Int)
+
+class EpubInfo(val title: String?, val spine: List<File>, val cover: File?, val toc: List<TocEntry>)
 
 /** An EPUB is a zip of XHTML files. We unzip it once and read the chapter list from its OPF file. */
 object Epub {
+
+    private const val OPS_NS = "http://www.idpf.org/2007/ops"
 
     fun unzip(input: InputStream, dest: File) {
         dest.mkdirs()
@@ -89,6 +93,111 @@ object Epub {
                 }
             }
         }
-        return EpubInfo(title, spine, cover?.takeIf { it.exists() })
+
+        val toc = try {
+            parseToc(doc, manifest, opfDir, spine)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        return EpubInfo(title, spine, cover?.takeIf { it.exists() }, toc)
+    }
+
+    // ---------------- Table of contents ----------------
+
+    private fun ancestorCount(el: Element, name: String): Int {
+        var n = 0
+        var cur = el.parentNode
+        while (cur != null) {
+            if (cur is Element && (cur.localName ?: cur.nodeName) == name) n++
+            cur = cur.parentNode
+        }
+        return n
+    }
+
+    private fun childElement(parent: Element?, name: String): Element? {
+        if (parent == null) return null
+        val kids = parent.childNodes
+        for (i in 0 until kids.length) {
+            val k = kids.item(i)
+            if (k is Element && (k.localName ?: k.nodeName) == name) return k
+        }
+        return null
+    }
+
+    private fun parseToc(
+        doc: Document,
+        manifest: Map<String, Element>,
+        opfDir: File,
+        spine: List<File>
+    ): List<TocEntry> {
+        val canon = spine.map { it.canonicalPath }
+
+        fun indexOf(base: File, href: String): Int {
+            val path = Uri.decode(href.substringBefore('#'))
+            if (path.isEmpty()) return -1
+            return canon.indexOf(File(base, path).canonicalPath)
+        }
+
+        // EPUB3: <nav epub:type="toc">
+        val navItem = manifest.values.firstOrNull {
+            it.getAttribute("properties").split(" ").contains("nav")
+        }
+        if (navItem != null) {
+            val navFile = File(opfDir, Uri.decode(navItem.getAttribute("href")))
+            if (navFile.exists()) {
+                val navDoc = parseXml(navFile)
+                val navs = navDoc.getElementsByTagNameNS("*", "nav")
+                var tocNav: Element? = null
+                for (i in 0 until navs.length) {
+                    val n = navs.item(i) as Element
+                    val type = n.getAttributeNS(OPS_NS, "type").ifEmpty { n.getAttribute("epub:type") }
+                    if (type.split(" ").contains("toc")) {
+                        tocNav = n
+                        break
+                    }
+                }
+                if (tocNav == null && navs.length > 0) tocNav = navs.item(0) as Element
+                if (tocNav != null) {
+                    val out = ArrayList<TocEntry>()
+                    val links = tocNav.getElementsByTagNameNS("*", "a")
+                    for (i in 0 until links.length) {
+                        val a = links.item(i) as Element
+                        val idx = indexOf(navFile.parentFile ?: opfDir, a.getAttribute("href"))
+                        if (idx < 0) continue
+                        val label = a.textContent.replace(Regex("\\s+"), " ").trim()
+                        if (label.isEmpty()) continue
+                        out.add(TocEntry(label, (ancestorCount(a, "ol") - 1).coerceAtLeast(0), idx))
+                    }
+                    if (out.isNotEmpty()) return out
+                }
+            }
+        }
+
+        // EPUB2: toc.ncx
+        val spineEl = doc.getElementsByTagNameNS("*", "spine").item(0) as? Element
+        val ncxId = spineEl?.getAttribute("toc")
+        val byId = if (!ncxId.isNullOrEmpty()) manifest[ncxId] else null
+        val ncxItem = byId ?: manifest.values.firstOrNull {
+            it.getAttribute("media-type") == "application/x-dtbncx+xml"
+        }
+        if (ncxItem != null) {
+            val ncxFile = File(opfDir, Uri.decode(ncxItem.getAttribute("href")))
+            if (ncxFile.exists()) {
+                val ncx = parseXml(ncxFile)
+                val points = ncx.getElementsByTagNameNS("*", "navPoint")
+                val out = ArrayList<TocEntry>()
+                for (i in 0 until points.length) {
+                    val p = points.item(i) as Element
+                    val label = childElement(childElement(p, "navLabel"), "text")
+                        ?.textContent?.replace(Regex("\\s+"), " ")?.trim() ?: ""
+                    val src = childElement(p, "content")?.getAttribute("src") ?: ""
+                    val idx = indexOf(ncxFile.parentFile ?: opfDir, src)
+                    if (idx < 0 || label.isEmpty()) continue
+                    out.add(TocEntry(label, ancestorCount(p, "navPoint"), idx))
+                }
+                return out
+            }
+        }
+        return emptyList()
     }
 }

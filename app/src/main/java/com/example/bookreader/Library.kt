@@ -14,7 +14,7 @@ import java.util.UUID
  *   epub -> chapter * 10000 + progress inside chapter (0..9999) / chapterCount * 10000
  *   txt  -> scroll progress 0..10000 / 10000
  * path: file for pdf and txt, the unzipped folder for epub.
- * lastOpened == 0 means the book was never opened.
+ * lastOpened == 0 means the book was never opened. shelf == "" means no shelf.
  */
 data class Book(
     val id: String,
@@ -23,10 +23,13 @@ data class Book(
     val type: String,
     var position: Int,
     var total: Int,
-    var lastOpened: Long
+    var lastOpened: Long,
+    var shelf: String = "",
+    val added: Long = 0L
 ) {
     fun progressText(): String = when {
         lastOpened == 0L -> "Not started"
+        isFinished() -> "Finished"
         type == "pdf" -> "Page ${position + 1} of $total"
         type == "epub" -> "Chapter ${position / 10000 + 1} of ${total / 10000}"
         else -> "${position / 100}%"
@@ -37,6 +40,12 @@ data class Book(
         type == "pdf" -> if (total > 0) ((position + 1) * 100L / total).toInt() else 0
         type == "epub" -> if (total > 0) (position * 100L / total).toInt() else 0
         else -> position / 100
+    }
+
+    fun isFinished(): Boolean = lastOpened > 0 && when (type) {
+        "pdf" -> total > 0 && position + 1 >= total - 1
+        "epub" -> total > 0 && position >= total - 1000
+        else -> position >= 9800
     }
 }
 
@@ -55,7 +64,7 @@ object Library {
                 Book(
                     o.getString("id"), o.getString("title"), o.getString("path"),
                     o.getString("type"), o.getInt("position"), o.getInt("total"),
-                    o.getLong("lastOpened")
+                    o.getLong("lastOpened"), o.optString("shelf", ""), o.optLong("added", 0L)
                 )
             )
         }
@@ -70,6 +79,7 @@ object Library {
                     .put("id", it.id).put("title", it.title).put("path", it.path)
                     .put("type", it.type).put("position", it.position)
                     .put("total", it.total).put("lastOpened", it.lastOpened)
+                    .put("shelf", it.shelf).put("added", it.added)
             )
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
@@ -90,12 +100,79 @@ object Library {
         save(ctx, books)
     }
 
+    fun setShelf(ctx: Context, id: String, shelf: String) {
+        val books = load(ctx)
+        books.firstOrNull { it.id == id }?.shelf = shelf.trim()
+        save(ctx, books)
+    }
+
     fun delete(ctx: Context, book: Book) {
         val p = File(book.path)
         if (p.isDirectory) p.deleteRecursively() else p.delete()
         Covers.file(ctx, book).delete()
         save(ctx, load(ctx).filter { it.id != book.id })
     }
+
+    // ---------------- Backup support ----------------
+
+    /** Library as JSON with file paths relative to the app's files folder. */
+    fun exportJson(ctx: Context): String {
+        val arr = JSONArray()
+        load(ctx).forEach { b ->
+            val rel = try {
+                File(b.path).relativeTo(ctx.filesDir).path
+            } catch (e: IllegalArgumentException) {
+                b.path
+            }
+            arr.put(
+                JSONObject()
+                    .put("id", b.id).put("title", b.title)
+                    .put("path", rel.replace(File.separatorChar, '/'))
+                    .put("type", b.type).put("position", b.position)
+                    .put("total", b.total).put("lastOpened", b.lastOpened)
+                    .put("shelf", b.shelf).put("added", b.added)
+            )
+        }
+        return JSONObject().put("version", 1).put("books", arr).toString()
+    }
+
+    /** Adds books from a backup; for books already present, keeps whichever reading position is newer. */
+    fun mergeFromJson(ctx: Context, raw: String): Int {
+        val arr = JSONObject(raw).getJSONArray("books")
+        val current = load(ctx)
+        val root = ctx.filesDir.canonicalPath + File.separator
+        var changed = 0
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val id = o.getString("id")
+            val file = File(ctx.filesDir, o.getString("path"))
+            if (!file.exists() || !file.canonicalPath.startsWith(root)) continue
+            val lastOpened = o.getLong("lastOpened")
+            val existing = current.firstOrNull { it.id == id }
+            if (existing == null) {
+                current.add(
+                    Book(
+                        id, o.getString("title"), file.path, o.getString("type"),
+                        o.getInt("position"), o.getInt("total"), lastOpened,
+                        o.optString("shelf", ""), o.optLong("added", 0L)
+                    )
+                )
+                changed++
+            } else {
+                if (lastOpened > existing.lastOpened) {
+                    existing.position = o.getInt("position")
+                    existing.total = o.getInt("total")
+                    existing.lastOpened = lastOpened
+                    changed++
+                }
+                if (existing.shelf.isEmpty()) existing.shelf = o.optString("shelf", "")
+            }
+        }
+        save(ctx, current)
+        return changed
+    }
+
+    // ---------------- Import ----------------
 
     /** Copies/unpacks the picked file into app storage. Returns null if the file type is unsupported. */
     fun import(ctx: Context, uri: Uri): Book? {
@@ -134,7 +211,7 @@ object Library {
         ctx.contentResolver.openInputStream(uri)?.use { input ->
             file.outputStream().use { input.copyTo(it) }
         } ?: return null
-        return Book(id, title, file.path, type, 0, 0, 0L)
+        return Book(id, title, file.path, type, 0, 0, 0L, "", System.currentTimeMillis())
     }
 
     private fun importEpub(ctx: Context, uri: Uri, id: String, dir: File, fallbackTitle: String): Book? {
@@ -147,7 +224,7 @@ object Library {
                 return null
             }
             val title = info.title?.takeIf { it.isNotBlank() } ?: fallbackTitle
-            return Book(id, title, dir.path, "epub", 0, 0, 0L)
+            return Book(id, title, dir.path, "epub", 0, 0, 0L, "", System.currentTimeMillis())
         } catch (e: Exception) {
             dir.deleteRecursively()
             throw e
